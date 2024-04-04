@@ -223,6 +223,7 @@ enum llm_arch {
     LLM_ARCH_BITNET,
     LLM_ARCH_T5,
     LLM_ARCH_JAIS,
+    LLM_ARCH_RWKV,
     LLM_ARCH_UNKNOWN,
 };
 
@@ -267,6 +268,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_BITNET,          "bitnet"       },
     { LLM_ARCH_T5,              "t5"           },
     { LLM_ARCH_JAIS,            "jais"         },
+    { LLM_ARCH_RWKV,            "rwkv"         },
     { LLM_ARCH_UNKNOWN,         "(unknown)"    },
 };
 
@@ -1286,6 +1288,12 @@ static const std::map<llm_arch, std::map<llm_tensor, std::string>> LLM_TENSOR_NA
             { LLM_TENSOR_FFN_UP,          "blk.%d.ffn_up" },
             { LLM_TENSOR_FFN_GATE,        "blk.%d.ffn_gate" },
             { LLM_TENSOR_FFN_DOWN,        "blk.%d.ffn_down" },
+        },
+    },
+    {
+        LLM_ARCH_RWKV,
+        {
+            { LLM_TENSOR_TOKEN_EMBD,      "token_embd" },
         },
     },
     {
@@ -5339,6 +5347,16 @@ static void llm_load_vocab(
                 }
 #endif
             }
+        } else if (tokenizer_name == "rwkv") {
+            vocab.type = LLAMA_VOCAB_TYPE_RWKV;
+
+            // default special tokens
+            vocab.special_bos_id = 0;
+            vocab.special_eos_id = 0;
+            vocab.special_unk_id = -1;
+            vocab.special_sep_id = -1;
+            vocab.special_pad_id = -1;
+            vocab.add_space_prefix = false;
         } else {
             throw std::runtime_error(format("unknown tokenizer: '%s'", tokenizer_model.c_str()));
         }
@@ -16570,9 +16588,9 @@ struct llama_context * llama_new_context_with_model(
     ggml_type type_k = params.type_k;
     ggml_type type_v = params.type_v;
 
-    // Mamba only needs a constant number of KV cache cells per sequence
-    if (model->arch == LLM_ARCH_MAMBA) {
-        // Mamba needs at least as many KV cells as there are sequences kept at any time
+    // Mamba and RWKV only need a constant number of KV cache cells per sequence
+    if (model->arch == LLM_ARCH_MAMBA || model->arch == LLM_ARCH_RWKV) {
+        // Mamba and RWKV need at least as many KV cells as there are sequences kept at any time
         kv_size = std::max((uint32_t) 1, params.n_seq_max);
         // it's probably best to keep as much precision as possible for the states
         type_k = GGML_TYPE_F32; // required by ggml_ssm_conv for Mamba's conv_states
@@ -16880,6 +16898,7 @@ enum llama_rope_type llama_rope_type(const struct llama_model * model) {
         case LLM_ARCH_JINA_BERT_V2:
         case LLM_ARCH_T5:
         case LLM_ARCH_JAIS:
+        case LLM_ARCH_RWKV:
             return LLAMA_ROPE_TYPE_NONE;
 
         // use what we call a normal RoPE, operating on pairs of consecutive head values
