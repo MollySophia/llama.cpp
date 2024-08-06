@@ -8467,7 +8467,7 @@ static struct ggml_tensor * llm_build_time_mix(
     const struct llama_layer * layer,
     struct ggml_tensor * current,
     struct ggml_tensor * x_prev,
-    struct ggml_tensor ** wkv_state) {
+    struct ggml_tensor * wkv_state) {
     size_t n_embed = current->ne[0];
     size_t n_tokens = current->ne[1];
     size_t head_size = layer->time_mix_first->ne[0];
@@ -8514,28 +8514,28 @@ static struct ggml_tensor * llm_build_time_mix(
     struct ggml_tensor *mk = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embed * n_tokens);
     mk = ggml_reshape_2d(
         ctx,
-        ggml_set_1d(ctx, mk, ggml_view_1d(ctx, xxx, n_embed * n_tokens, n_embed * n_tokens * sizeof(float)), 0),
+        ggml_set_1d_inplace(ctx, mk, ggml_view_1d(ctx, xxx, n_embed * n_tokens, n_embed * n_tokens * sizeof(float)), 0),
         n_embed, n_tokens
     );
 
     struct ggml_tensor *mv = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embed * n_tokens);
     mv = ggml_reshape_2d(
         ctx,
-        ggml_set_1d(ctx, mv, ggml_view_1d(ctx, xxx, n_embed * n_tokens, n_embed * n_tokens * 2 * sizeof(float)), 0),
+        ggml_set_1d_inplace(ctx, mv, ggml_view_1d(ctx, xxx, n_embed * n_tokens, n_embed * n_tokens * 2 * sizeof(float)), 0),
         n_embed, n_tokens
     );
 
     struct ggml_tensor *mr = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embed * n_tokens);
     mr = ggml_reshape_2d(
         ctx,
-        ggml_set_1d(ctx, mr, ggml_view_1d(ctx, xxx, n_embed * n_tokens, n_embed * n_tokens * 3 * sizeof(float)), 0),
+        ggml_set_1d_inplace(ctx, mr, ggml_view_1d(ctx, xxx, n_embed * n_tokens, n_embed * n_tokens * 3 * sizeof(float)), 0),
         n_embed, n_tokens
     );
 
     struct ggml_tensor *mg = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_embed * n_tokens);
     mg = ggml_reshape_2d(
         ctx,
-        ggml_set_1d(ctx, mg, ggml_view_1d(ctx, xxx, n_embed * n_tokens, n_embed * n_tokens * 4 * sizeof(float)), 0),
+        ggml_set_1d_inplace(ctx, mg, ggml_view_1d(ctx, xxx, n_embed * n_tokens, n_embed * n_tokens * 4 * sizeof(float)), 0),
         n_embed, n_tokens
     );
 
@@ -8616,7 +8616,7 @@ static struct ggml_tensor * llm_build_time_mix(
     k = ggml_transpose(ctx, k);
     v = ggml_transpose(ctx, v);
     r = ggml_transpose(ctx, r);
-    current = ggml_rwkv_wkv(ctx, k, v, r, layer->time_mix_first, w, *wkv_state);
+    current = ggml_rwkv_wkv(ctx, k, v, r, layer->time_mix_first, w, wkv_state);
 
     // ggml_group_norm considers groups in the third dimension.
     current = ggml_reshape_4d(ctx, current, 1, 1, n_embed, n_tokens);
@@ -14052,7 +14052,7 @@ struct llm_build_context {
             const llama_layer * layer = &model.layers[layer_i];
 
             // TODO: handle multiple kv cache cells
-            struct ggml_tensor * wkv_states = ggml_view_1d(ctx0, kv_self.v_l[layer_i], hparams.n_embd_v_s(), (kv_self.size - 1) *  hparams.n_embd_v_s() * ggml_type_size(kv_self.k_l[layer_i]->type));
+            struct ggml_tensor * wkv_state = ggml_view_1d(ctx0, kv_self.v_l[layer_i], hparams.n_embd_v_s(), (kv_self.size - 1) *  hparams.n_embd_v_s() * ggml_type_size(kv_self.k_l[layer_i]->type));
             struct ggml_tensor * att_shift = ggml_view_1d(ctx0, kv_self.k_l[layer_i], n_embd, (kv_self.size - 1) * 2 * n_embd * ggml_type_size(kv_self.k_l[layer_i]->type));
             struct ggml_tensor * ffn_shift = ggml_view_1d(ctx0, kv_self.k_l[layer_i], n_embd, ((kv_self.size - 1) * 2 + 1) * n_embd * ggml_type_size(kv_self.k_l[layer_i]->type));
 
@@ -14066,7 +14066,7 @@ struct llm_build_context {
                 n_embd * ggml_type_size(x_prev->type)
             );
 
-            x = ggml_add(ctx0, x, llm_build_time_mix(ctx0, layer, x_norm, x_prev, &wkv_states));
+            x = ggml_add(ctx0, x, llm_build_time_mix(ctx0, layer, x_norm, x_prev, wkv_state));
             ggml_build_forward_expand(gf, x);
             ggml_build_forward_expand(
                 gf,
@@ -14078,24 +14078,7 @@ struct llm_build_context {
                         n_embd,
                         (n_tokens - 1) * n_embd * ggml_type_size(kv_self.k_l[layer_i]->type)
                     ),
-                    ggml_view_1d(ctx0, kv_self.k_l[layer_i], n_embd, (kv_self.size - 1) * 2 * n_embd * ggml_type_size(kv_self.k_l[layer_i]->type))
-                )
-            );
-            ggml_build_forward_expand(
-                gf,
-                ggml_cpy(
-                    ctx0,
-                    ggml_view_1d(
-                        ctx0,
-                        wkv_states,
-                        hparams.n_embd_v_s(),
-                        0
-                    ),
-                    ggml_view_1d(
-                        ctx0,
-                        kv_self.v_l[layer_i],
-                        hparams.n_embd_v_s(),
-                        (kv_self.size - 1) *  hparams.n_embd_v_s() * ggml_type_size(kv_self.k_l[layer_i]->type))
+                    att_shift
                 )
             );
 
@@ -14120,12 +14103,7 @@ struct llm_build_context {
                         n_embd,
                         (n_tokens - 1) * n_embd * ggml_type_size(kv_self.k_l[layer_i]->type)
                     ),
-                    ggml_view_1d(
-                        ctx0,
-                        kv_self.k_l[layer_i],
-                        n_embd,
-                        ((kv_self.size - 1) * 2 + 1) * n_embd * ggml_type_size(kv_self.k_l[layer_i]->type)
-                    )
+                    ffn_shift
                 )
             );
         }
