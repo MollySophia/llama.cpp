@@ -18227,6 +18227,7 @@ static void ggml_compute_backward(struct ggml_context * ctx, struct ggml_tensor 
             } break;
         case GGML_OP_GET_REL_POS:
         case GGML_OP_ADD_REL_POS:
+        case GGML_OP_RWKV_WKV:
         case GGML_OP_MAP_UNARY:
         case GGML_OP_MAP_BINARY:
         case GGML_OP_MAP_CUSTOM1_F32:
