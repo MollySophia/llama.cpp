@@ -16445,6 +16445,10 @@ static void ggml_compute_forward_rwkv_wkv_f32(
 
     float * dst_data = (float *) dst->data;
 
+    if (params->ith != 0) {
+        return;
+    }
+
     memset(dst_data, 0, T * C * sizeof(float));
 
     float * k =          (float *) dst->src[0]->data;
