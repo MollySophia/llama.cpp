@@ -132,6 +132,9 @@ class Keys:
         STATE_SIZE     = "{arch}.ssm.state_size"
         TIME_STEP_RANK = "{arch}.ssm.time_step_rank"
 
+    class WKV:
+        HEAD_SIZE = "{arch}.wkv.head_size"
+
     class Tokenizer:
         MODEL                = "tokenizer.ggml.model"
         PRE                  = "tokenizer.ggml.pre"
