@@ -506,6 +506,7 @@ extern "C" {
         GGML_OP_GET_REL_POS,
         GGML_OP_ADD_REL_POS,
         GGML_OP_RWKV_WKV,
+        GGML_OP_RWKV_TOKEN_SHIFT,
 
         GGML_OP_UNARY,
 
@@ -1856,7 +1857,14 @@ extern "C" {
             struct ggml_tensor * r,
             struct ggml_tensor * tf,
             struct ggml_tensor * td,
-            struct ggml_tensor * state);
+            struct ggml_tensor * state,
+            struct ggml_tensor * state_seq);
+
+    GGML_API struct ggml_tensor * ggml_rwkv_token_shift(
+            struct ggml_context * ctx,
+            struct ggml_tensor * x_carry,
+            struct ggml_tensor * x_norm,
+            struct ggml_tensor * state_seq);
 
     // custom operators
 
