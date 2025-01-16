@@ -3428,11 +3428,12 @@ class Rwkv7Model(Rwkv6Model):
         layer_norm_eps = self.hparams["layer_norm_epsilon"]
         intermediate_size = self.hparams["intermediate_size"] if self.hparams["intermediate_size"] is not None else (hidden_size * 4)
 
+        # ICLR: In-Context-Learning-Rate
         calc_lora_rank = lambda exponent, multiplier: max(1, round(hidden_size ** exponent * multiplier / 32)) * 32
-        lora_rank_decay = self.hparams["lora_rank_decay"] if self.hparams["intermediate_size"] is not None else calc_lora_rank(0.5, 1.8)
-        lora_rank_iclr = self.hparams["lora_rank_iclr"] if self.hparams["intermediate_size"] is not None else calc_lora_rank(0.5, 1.8)
-        lora_rank_value_residual_mix = self.hparams["lora_rank_value_residual_mix"] if self.hparams["intermediate_size"] is not None else calc_lora_rank(0.5, 1.3)
-        lora_rank_gate = self.hparams["lora_rank_gate"] if self.hparams["intermediate_size"] is not None else calc_lora_rank(0.8, 1.6)
+        lora_rank_decay = self.hparams["lora_rank_decay"] if self.hparams["lora_rank_decay"] is not None else calc_lora_rank(0.5, 1.8)
+        lora_rank_iclr = self.hparams["lora_rank_iclr"] if self.hparams["lora_rank_iclr"] is not None else calc_lora_rank(0.5, 1.8)
+        lora_rank_value_residual_mix = self.hparams["lora_rank_value_residual_mix"] if self.hparams["lora_rank_value_residual_mix"] is not None else calc_lora_rank(0.5, 1.3)
+        lora_rank_gate = self.hparams["lora_rank_gate"] if self.hparams["lora_rank_gate"] is not None else calc_lora_rank(0.8, 0.6)
 
         # RWKV isn't context limited
         self.gguf_writer.add_context_length(1048576)
@@ -3460,7 +3461,7 @@ class Rwkv7Model(Rwkv6Model):
                 self.lerp_weights[bid] = {name: data_torch}
             if all(f"model.blocks.{bid}.attention.x_{i}" in self.lerp_weights[bid].keys() for i in ["r", "w", "k", "v", "a", "g"]):
                 new_name = f"blk.{bid}.time_mix_lerp_fused.weight"
-                data = torch.stack([self.lerp_weights[bid][f"model.blocks.{bid}.attention.x_{i}"] for i in ["r", "w", "k", "v", "a", "g"]], dim=0)
+                data = torch.stack([self.lerp_weights[bid][f"model.blocks.{bid}.attention.x_{i}"].squeeze(0) for i in ["r", "w", "k", "v", "a", "g"]], dim=0)
                 yield (new_name, data)
             return
         else:
@@ -3470,8 +3471,23 @@ class Rwkv7Model(Rwkv6Model):
             if not (new_name.endswith(".weight") or new_name.endswith(".bias")):
                 new_name += ".weight"
 
+            if any(
+                new_name.endswith(t) for t in [
+                    "time_mix_w1.weight", "time_mix_w2.weight",
+                    "time_mix_a1.weight", "time_mix_a2.weight",
+                    "time_mix_v1.weight", "time_mix_v2.weight",
+                    "time_mix_g1.weight", "time_mix_g2.weight",
+                ]
+            ):
+                data_torch = data_torch.transpose(0, 1)
+
             if 'r_k' in new_name:
                 data_torch = data_torch.flatten()
+
+            if bid == 0 and "time_mix_a" in new_name:
+                # dummy v0/v1/v2 on first layer
+                # easist way to make llama happy
+                yield (new_name.replace("time_mix_a", "time_mix_v"), data_torch)
 
             yield (new_name, data_torch)
 

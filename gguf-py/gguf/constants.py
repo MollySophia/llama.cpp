@@ -133,7 +133,7 @@ class Keys:
         KV_LORA_RANK                 = "{arch}.attention.kv_lora_rank"
         DECAY_LORA_RANK              = "{arch}.attention.decay_lora_rank"
         ICLR_LORA_RANK               = "{arch}.attention.iclr_lora_rank"
-        VALUE_RESIDUAL_MIX_LORA_RANK = "{arch}.attention.value_residual_lora_rank"
+        VALUE_RESIDUAL_MIX_LORA_RANK = "{arch}.attention.value_residual_mix_lora_rank"
         GATE_LORA_RANK               = "{arch}.attention.gate_lora_rank"
         REL_BUCKETS_COUNT            = "{arch}.attention.relative_buckets_count"
         SLIDING_WINDOW               = "{arch}.attention.sliding_window"
