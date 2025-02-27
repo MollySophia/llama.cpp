@@ -1,11 +1,12 @@
 #include "common.cuh"
 #include "wkv.cuh"
 
+template <int HEAD_SIZE>
 static __global__ void rwkv_wkv6_f32(const int B, const int T, const int C, const int H, const float * k, const float * v, const float * r, const float * tf, const float * td, const float * s, float * dst) {
     const int tid = threadIdx.x;
     const int bid = blockIdx.x;
 
-    const int head_size = CUDA_WKV_BLOCK_SIZE;
+    const int head_size = HEAD_SIZE;
     const int batch_i = bid / H;
     const int head_i = bid % H;
     const int state_size = C * head_size;
@@ -64,11 +65,12 @@ static __global__ void rwkv_wkv6_f32(const int B, const int T, const int C, cons
     }
 }
 
+template <int HEAD_SIZE>
 static __global__ void rwkv_wkv7_f32(const int B, const int T, const int C, const int H, const float * r, const float * w, const float * k, const float * v, const float * a, const float * b, const float * s, float * dst) {
     const int tid = threadIdx.x;
     const int bid = blockIdx.x;
 
-    const int head_size = CUDA_WKV_BLOCK_SIZE;
+    const int head_size = HEAD_SIZE;
     const int batch_i = bid / H;
     const int head_i = bid % H;
     const int state_size = C * head_size;
@@ -156,9 +158,14 @@ void ggml_cuda_op_rwkv_wkv6(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
 
     GGML_ASSERT(dst->src[5]->type == GGML_TYPE_F32);
     GGML_ASSERT(C % H == 0);
-    GGML_ASSERT(C / H == CUDA_WKV_BLOCK_SIZE); // The current cuda kernel is designed for RWKV6, HEAD_SIZE == 64
+    GGML_ASSERT(C / H == CUDA_WKV_BLOCK_SIZE || C / H == 2 * CUDA_WKV_BLOCK_SIZE);
 
-    rwkv_wkv6_f32<<<B * H, C / H, 0, stream>>>(B, T, C, H, k_d, v_d, r_d, tf_d, td_d, s_d, dst_d);
+    if (C / H == CUDA_WKV_BLOCK_SIZE) {
+        rwkv_wkv6_f32<CUDA_WKV_BLOCK_SIZE><<<B * H, CUDA_WKV_BLOCK_SIZE, 0, stream>>>(B, T, C, H, k_d, v_d, r_d, tf_d, td_d, s_d, dst_d);
+    } else {
+        rwkv_wkv6_f32<2 * CUDA_WKV_BLOCK_SIZE><<<B * H, 2 * CUDA_WKV_BLOCK_SIZE, 0, stream>>>(B, T, C, H, k_d, v_d, r_d, tf_d, td_d, s_d, dst_d);
+    }
+    
 }
 
 void ggml_cuda_op_rwkv_wkv7(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
@@ -181,7 +188,11 @@ void ggml_cuda_op_rwkv_wkv7(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
 
     GGML_ASSERT(dst->src[6]->type == GGML_TYPE_F32);
     GGML_ASSERT(C % H == 0);
-    GGML_ASSERT(C / H == CUDA_WKV_BLOCK_SIZE);
-
-    rwkv_wkv7_f32<<<B * H, C / H, 0, stream>>>(B, T, C, H, r_d, w_d, k_d, v_d, a_d, b_d, s_d, dst_d);
+    GGML_ASSERT(C / H == CUDA_WKV_BLOCK_SIZE || C / H == 2 * CUDA_WKV_BLOCK_SIZE);
+    if (C / H == 2 * CUDA_WKV_BLOCK_SIZE) {
+        rwkv_wkv7_f32<2 * CUDA_WKV_BLOCK_SIZE><<<B * H, 2 * CUDA_WKV_BLOCK_SIZE, 0, stream>>>(B, T, C, H, r_d, w_d, k_d, v_d, a_d, b_d, s_d, dst_d);
+    } else {
+        rwkv_wkv7_f32<CUDA_WKV_BLOCK_SIZE><<<B * H, CUDA_WKV_BLOCK_SIZE, 0, stream>>>(B, T, C, H, r_d, w_d, k_d, v_d, a_d, b_d, s_d, dst_d);
+    }
+    
 }

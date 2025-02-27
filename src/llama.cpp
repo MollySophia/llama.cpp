@@ -1047,7 +1047,8 @@ static struct ggml_tensor * llm_build_rwkv7_time_mix(
         struct ggml_tensor * x_prev,
         struct ggml_tensor ** wkv_state,
         struct ggml_tensor * & first_layer_value,
-        size_t wkv_head_size) {
+        size_t wkv_head_size,
+        size_t head_count_kv) {
     size_t n_embd       = cur->ne[0];
     size_t n_seq_tokens = cur->ne[1];
     size_t n_seqs       = cur->ne[2];
@@ -1058,21 +1059,34 @@ static struct ggml_tensor * llm_build_rwkv7_time_mix(
     size_t n_tokens = n_seqs * n_seq_tokens;
 
     bool has_gating = layer->time_mix_g1 && layer->time_mix_g2;
+    bool has_token_shift = (x_prev != NULL);
 
-    struct ggml_tensor * sx = ggml_sub(ctx, x_prev, cur);
-    struct ggml_tensor * dummy = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, n_embd, n_seq_tokens, n_seqs, has_gating ? 6 : 5);
-    sx = ggml_repeat(ctx, sx, dummy);
+    struct ggml_tensor * xr, * xw, * xk, * xv, * xa, * xg;
+    if (has_token_shift) {
+        struct ggml_tensor * sx = ggml_sub(ctx, x_prev, cur);
+        struct ggml_tensor * dummy = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, n_embd, n_seq_tokens, n_seqs, has_gating ? 6 : 5);
+        sx = ggml_repeat(ctx, sx, dummy);
 
-    struct ggml_tensor * xxx = ggml_add(ctx, ggml_mul(ctx, sx, layer->time_mix_lerp_fused), cur);
-
-    struct ggml_tensor * xr = ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], 0);
-    struct ggml_tensor * xw = ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * sizeof(float));
-    struct ggml_tensor * xk = ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 2 * sizeof(float));
-    struct ggml_tensor * xv = ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 3 * sizeof(float));
-    struct ggml_tensor * xa = ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 4 * sizeof(float));
-    struct ggml_tensor * xg = has_gating ? ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 5 * sizeof(float)) : nullptr;
+        struct ggml_tensor * xxx = ggml_add(ctx, ggml_mul(ctx, sx, layer->time_mix_lerp_fused), cur);
+        xr = ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], 0);
+        xw = ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * sizeof(float));
+        xk = ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 2 * sizeof(float));
+        xv = ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 3 * sizeof(float));
+        xa = ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 4 * sizeof(float));
+        xg = has_gating ? ggml_view_2d(ctx, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 5 * sizeof(float)) : nullptr;
+    } else {
+        cur = ggml_reshape_2d(ctx, cur, n_embd, n_tokens);
+        xr = cur;
+        xw = cur;
+        xk = cur;
+        xv = cur;
+        xa = cur;
+        xg = has_gating ? cur : nullptr;
+    }
 
     struct ggml_tensor * r = llm_build_lora_mm(lctx, ctx, layer->time_mix_receptance, xr);
+    if (layer->time_mix_receptance_b) r = ggml_add(ctx, r, layer->time_mix_receptance_b);
+
     // Assume that there won't be lora adapters on these “lora” matmuls?
     struct ggml_tensor * w = ggml_add(
         ctx,
@@ -1082,7 +1096,19 @@ static struct ggml_tensor * llm_build_rwkv7_time_mix(
     w = ggml_exp(ctx, ggml_scale(ctx, ggml_sigmoid(ctx, w), -0.606531));
 
     struct ggml_tensor * k = llm_build_lora_mm(lctx, ctx, layer->time_mix_key, xk);
+    if (layer->time_mix_key_b) k = ggml_add(ctx, k, layer->time_mix_key_b);
     struct ggml_tensor * v = llm_build_lora_mm(lctx, ctx, layer->time_mix_value, xv);
+    if (layer->time_mix_value_b) v = ggml_add(ctx, v, layer->time_mix_value_b);
+
+    if (head_count_kv != head_count) {
+        GGML_ASSERT(head_count % head_count_kv == 0);
+        k = ggml_reshape_4d(ctx, k, head_size, 1, head_count_kv, n_tokens);
+        v = ggml_reshape_4d(ctx, v, head_size, 1, head_count_kv, n_tokens);
+        struct ggml_tensor * tmp = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, head_size, head_count / head_count_kv, head_count_kv, n_tokens);
+        k = ggml_reshape_2d(ctx, ggml_repeat(ctx, k, tmp), n_embd, n_tokens);
+        v = ggml_reshape_2d(ctx, ggml_repeat(ctx, v, tmp), n_embd, n_tokens);
+    }
+
     if (first_layer_value == nullptr) {
         first_layer_value = v;
     } else {
@@ -1115,8 +1141,20 @@ static struct ggml_tensor * llm_build_rwkv7_time_mix(
     struct ggml_tensor * kk = ggml_reshape_3d(ctx, ggml_mul(ctx, k, layer->time_mix_k_k), head_size, head_count, n_tokens);
     kk = ggml_l2_norm(ctx, kk, 1e-12);
 
-    struct ggml_tensor * ka = ggml_mul(ctx, k, layer->time_mix_k_a);
-    k = ggml_add(ctx, k, ggml_sub(ctx, ggml_mul(ctx, a, ka), ka));
+    if (has_token_shift) {
+        // k = k * (1 + (a-1) * self.k_a)
+        struct ggml_tensor * ka = ggml_mul(ctx, k, layer->time_mix_k_a);
+        k = ggml_add(ctx, k, ggml_sub(ctx, ggml_mul(ctx, a, ka), ka));
+    } else {
+        // RWKV7Qwen2 modification
+        // a = 1 + (a-1) * self.k_a
+        // k = k * a
+        // HACK: get a tensor with all ones
+        // TODO: add functions in ggml to do add/sub/mul/div with a scalar
+        struct ggml_tensor * a_ones = ggml_clamp(ctx, ggml_dup_tensor(ctx, a), 1.0f, 1.0f);
+        a = ggml_add(ctx, a_ones, ggml_mul(ctx, ggml_sub(ctx, a, a_ones), layer->time_mix_k_a));
+        k = ggml_mul(ctx, k, a);
+    }
 
     r = ggml_reshape_3d(ctx, r, head_size, head_count, n_tokens);
     w = ggml_reshape_3d(ctx, w, head_size, head_count, n_tokens);
@@ -1140,9 +1178,11 @@ static struct ggml_tensor * llm_build_rwkv7_time_mix(
         cur = ggml_reshape_2d(ctx, cur, n_embd, n_tokens);
     }
 
-    struct ggml_tensor * rk = ggml_sum_rows(ctx,
+    if (layer->time_mix_r_k) {
+        struct ggml_tensor * rk = ggml_sum_rows(ctx,
             ggml_mul(ctx, ggml_mul(ctx, k, r), ggml_reshape_2d(ctx, layer->time_mix_r_k, head_size, head_count)));
-    cur = ggml_add(ctx, cur, ggml_reshape_2d(ctx, ggml_mul(ctx, v, rk), n_embd, n_tokens));
+        cur = ggml_add(ctx, cur, ggml_reshape_2d(ctx, ggml_mul(ctx, v, rk), n_embd, n_tokens));
+    }
 
     if (has_gating) {
         cur = ggml_mul(ctx, cur, g);
@@ -7973,7 +8013,7 @@ struct llm_build_context {
                 1
             );
 
-            cur = ggml_add(ctx0, cur, llm_build_rwkv7_time_mix(lctx, ctx0, layer, x_norm_att, x_prev, &wkv_states, value_first_layer, hparams.wkv_head_size));
+            cur = ggml_add(ctx0, cur, llm_build_rwkv7_time_mix(lctx, ctx0, layer, x_norm_att, x_prev, &wkv_states, value_first_layer, hparams.wkv_head_size, n_embd / hparams.wkv_head_size));
             ggml_build_forward_expand(gf, cur);
             ggml_build_forward_expand(
                 gf,
@@ -8099,7 +8139,7 @@ struct llm_build_context {
                 )
             );
 
-            struct ggml_tensor * ffn_inp = ggml_add(ctx0, cur, llm_build_rwkv7_time_mix(lctx, ctx0, layer, x_norm_att, x_prev, &wkv_states, value_first_layer, hparams.wkv_head_size));
+            struct ggml_tensor * ffn_inp = ggml_add(ctx0, cur, llm_build_rwkv7_time_mix(lctx, ctx0, layer, x_norm_att, x_prev, &wkv_states, value_first_layer, hparams.wkv_head_size, n_embd / hparams.wkv_head_size));
             ggml_build_forward_expand(gf, ffn_inp);
             ggml_build_forward_expand(
                 gf,
@@ -8122,6 +8162,94 @@ struct llm_build_context {
                 struct ggml_tensor * inp_out_ids = build_inp_out_ids();
                 cur     = ggml_get_rows(ctx0, cur, inp_out_ids);
                 ffn_inp = ggml_get_rows(ctx0, ffn_inp, inp_out_ids);
+            }
+
+            // feed-forward network
+            cur = llm_build_norm(ctx0, ffn_inp, hparams,
+                    model.layers[il].ffn_norm, NULL,
+                    LLM_NORM_RMS, cb, il);
+            cb(cur, "ffn_norm", il);
+
+            cur = llm_build_ffn(ctx0, lctx, cur,
+                    model.layers[il].ffn_up,   NULL, NULL,
+                    model.layers[il].ffn_gate, NULL, NULL,
+                    model.layers[il].ffn_down, NULL, NULL,
+                    NULL,
+                    LLM_FFN_SILU, LLM_FFN_PAR, cb, il);
+            cb(cur, "ffn_out", il);
+
+            cur = ggml_add(ctx0, cur, ffn_inp);
+            cur = lctx.cvec.apply_to(ctx0, cur, il);
+            cb(cur, "l_out", il);
+
+            // input for next layer
+            inpL = cur;
+        }
+
+        cur = inpL;
+        cur = llm_build_norm(ctx0, cur, hparams, model.output_norm, model.output_norm_b, LLM_NORM_RMS, cb, -1);
+        cb(cur, "result_norm", -1);
+
+        cur = llm_build_lora_mm(lctx, ctx0, model.output, cur);
+        cb(cur, "result_output", -1);
+
+        ggml_build_forward_expand(gf, cur);
+
+        return gf;
+    }
+
+    ggml_cgraph * build_rwkv7qwen2() {
+        struct ggml_cgraph * gf = ggml_new_graph_custom(ctx0, model.max_nodes(), false);
+
+        const int64_t n_seqs = ubatch.n_seqs;
+        const int64_t n_seq_tokens = ubatch.n_seq_tokens;
+        const int64_t n_tokens = ubatch.n_tokens;
+        GGML_ASSERT(n_seqs != 0);
+        GGML_ASSERT(ubatch.equal_seqs);
+        GGML_ASSERT(n_tokens == n_seq_tokens * n_seqs);
+
+        struct ggml_tensor * cur;
+        struct ggml_tensor * inpL;
+        struct ggml_tensor * state_copy = build_inp_s_copy();
+        struct ggml_tensor * state_mask = build_inp_s_mask();
+        struct ggml_tensor * value_first_layer = nullptr;
+
+        inpL = llm_build_inp_embd(ctx0, lctx, hparams, ubatch, model.tok_embd, cb);
+
+        for (int il = 0; il < n_layer; ++il) {
+            const llama_layer * layer = &model.layers[il];
+
+            // (ab)using the KV cache to store the states
+            struct ggml_tensor * wkv_states = llm_build_copy_mask_state(ctx0,
+                    gf, kv_self.v_l[il], state_copy, state_mask,
+                    hparams.n_embd_v_s(), kv_self.size, kv_head, n_kv, n_seqs);
+
+            cur = ggml_reshape_3d(ctx0, inpL, n_embd, n_seq_tokens, n_seqs);
+            struct ggml_tensor * att_norm = llm_build_norm(ctx0, cur, hparams, layer->attn_norm, NULL, LLM_NORM_RMS, cb, il);
+
+            struct ggml_tensor * ffn_inp = ggml_add(ctx0, cur, llm_build_rwkv7_time_mix(lctx, ctx0, layer, att_norm, NULL, &wkv_states, value_first_layer, hparams.wkv_head_size, hparams.n_head_kv()));
+            ggml_build_forward_expand(gf, ffn_inp);
+            ggml_build_forward_expand(
+                gf,
+                ggml_cpy(
+                    ctx0,
+                    wkv_states,
+                    ggml_view_1d(
+                        ctx0,
+                        kv_self.v_l[il],
+                        hparams.n_embd_v_s() * n_seqs,
+                        hparams.n_embd_v_s() * kv_head * ggml_element_size(kv_self.v_l[il])
+                    )
+                )
+            );
+
+            cb(ffn_inp, "ffn_inp", il);
+
+            if (il == n_layer - 1) {
+                // skip computing output for unused tokens
+                struct ggml_tensor * inp_out_ids = build_inp_out_ids();
+                cur     = ggml_get_rows(ctx0, ggml_reshape_2d(ctx0, cur,     n_embd, n_tokens), inp_out_ids);
+                ffn_inp = ggml_get_rows(ctx0, ggml_reshape_2d(ctx0, ffn_inp, n_embd, n_tokens), inp_out_ids);
             }
 
             // feed-forward network
@@ -8778,6 +8906,10 @@ static struct ggml_cgraph * llama_build_graph(
         case LLM_ARCH_ARWKV7:
             {
                 result = llm.build_arwkv7();
+            } break;
+        case LLM_ARCH_RWKV7QWEN2:
+            {
+                result = llm.build_rwkv7qwen2();
             } break;
         case LLM_ARCH_CHAMELEON:
             {

@@ -3539,7 +3539,7 @@ class Rwkv7Model(Model):
         # unify tensor names here to make life easier
         name = name.replace("blocks", "layers").replace("ffn", "feed_forward")
         name = name.replace("self_attn", "attention").replace("attn", "attention")
-        name = name.replace("time_mixer.", "")
+        name = name.replace("time_mixer.", "").replace("q_proj", "r_proj")
         # lora layer names in fla-hub's impl
         if "_lora.lora" in name:
             self.lora_needs_transpose = False
@@ -3592,7 +3592,15 @@ class Rwkv7Model(Model):
                 data_torch = data_torch.transpose(0, 1)
 
             if 'r_k' in new_name:
-                data_torch = data_torch.flatten()
+                if self.model_arch == gguf.MODEL_ARCH.RWKV7QWEN2:
+                    # exists in RWKV7Qwen2 safetensors but actually not used
+                    return
+                else:
+                    data_torch = data_torch.flatten()
+            
+            # HACK: will be removed in the future
+            if self.model_arch == gguf.MODEL_ARCH.RWKV7QWEN2 and 'time_mix_w0' in new_name:
+                data_torch = data_torch * 2
 
             if bid == 0 and "time_mix_a" in new_name:
                 # dummy v0/v1/v2 on first layer
@@ -3640,6 +3648,50 @@ class ARwkv7Model(Rwkv7Model):
         self.gguf_writer.add_feed_forward_length(intermediate_size)
         self.gguf_writer.add_file_type(self.ftype)
         self.gguf_writer.add_token_shift_count(1)
+
+        # required by llama.cpp, unused
+        self.gguf_writer.add_head_count(0)
+
+
+@Model.register("RWKV7Qwen2ForCausalLM")
+class RWKV7Qwen2Model(Rwkv7Model):
+    model_arch = gguf.MODEL_ARCH.RWKV7QWEN2
+
+    def set_vocab(self):
+        try:
+            self._set_vocab_sentencepiece()
+        except FileNotFoundError:
+            self._set_vocab_gpt2()
+
+    def set_gguf_parameters(self):
+        block_count = self.hparams["num_hidden_layers"]
+        num_attention_heads = self.hparams["num_attention_heads"]
+        num_key_value_heads = self.hparams["num_key_value_heads"]
+        hidden_size = self.hparams["hidden_size"]
+        head_size = hidden_size // num_attention_heads
+        rms_norm_eps = self.hparams["rms_norm_eps"]
+        intermediate_size = self.hparams["intermediate_size"]
+
+        # ICLR: In-Context-Learning-Rate
+        lora_rank_decay = self.hparams.get("lora_rank_decay", self.calc_lora_rank(hidden_size, 0.5, 1.8))
+        lora_rank_iclr = self.hparams.get("lora_rank_iclr", self.calc_lora_rank(hidden_size, 0.5, 1.8))
+        lora_rank_value_residual_mix = self.hparams.get("lora_rank_value_residual_mix", self.calc_lora_rank(hidden_size, 0.5, 1.3))
+        lora_rank_gate = self.hparams.get("lora_rank_gate", self.calc_lora_rank(hidden_size, 0.8, 0.6))
+
+        # RWKV isn't context limited
+        self.gguf_writer.add_context_length(1048576)
+        self.gguf_writer.add_embedding_length(hidden_size)
+        self.gguf_writer.add_block_count(block_count)
+        self.gguf_writer.add_layer_norm_rms_eps(rms_norm_eps)
+        self.gguf_writer.add_wkv_head_size(head_size)
+        self.gguf_writer.add_decay_lora_rank(lora_rank_decay)
+        self.gguf_writer.add_iclr_lora_rank(lora_rank_iclr)
+        self.gguf_writer.add_value_residual_mix_lora_rank(lora_rank_value_residual_mix)
+        self.gguf_writer.add_gate_lora_rank(lora_rank_gate)
+        self.gguf_writer.add_feed_forward_length(intermediate_size)
+        self.gguf_writer.add_file_type(self.ftype)
+        self.gguf_writer.add_token_shift_count(0)
+        self.gguf_writer.add_head_count_kv(num_key_value_heads)
 
         # required by llama.cpp, unused
         self.gguf_writer.add_head_count(0)
