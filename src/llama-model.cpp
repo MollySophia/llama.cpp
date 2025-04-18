@@ -3317,6 +3317,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
                     output_norm_b = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "bias"), {n_embd}, 0);
                     output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), {n_embd, n_vocab}, 0);
+                    output_b = create_tensor(tn(LLM_TENSOR_OUTPUT, "bias"), {n_vocab}, TENSOR_NOT_REQUIRED);
 
                     const int n_lora_decay = hparams.n_lora_decay;
                     const int n_lora_iclr = hparams.n_lora_iclr;
